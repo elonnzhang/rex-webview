@@ -22,6 +22,7 @@ static RexWVPane *pane;
     id _keyMonitor;
     unsigned long _ticks;
     BOOL _shown;
+    BOOL _raised;         // 窗口在浮动层级上，Rex 的普通窗口提到前面也压不住它
     BOOL _covered;        // Rex 自己的别的窗口（命令面板、对话框）盖在窗格上
     BOOL _focusWhenShown; // 一显示出来就接管键盘
     BOOL _focused;        // 窗格是不是 Rex 里有焦点的那个
@@ -127,6 +128,22 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
     _shown = NO;
 }
 
+// 网页窗口在前台时点 Rex 的别的窗格，Rex 一激活就把它的窗口提到最前；
+// 普通层级的网页窗口会被压到下面，等收到激活通知再回到上面，中间网页闪一下。
+- (void)raise {
+    if (_raised) return;
+    self.window.level = NSFloatingWindowLevel;
+    _raised = YES;
+}
+
+// Rex 和网页窗口都不在前台时放回普通层级，再贴回 Rex 窗口上面，别的应用的窗口就能盖住它。
+- (void)lower {
+    if (!_raised) return;
+    self.window.level = NSNormalWindowLevel;
+    _raised = NO;
+    if (_shown && _hasHost) [self.window orderWindow:NSWindowAbove relativeTo:_host];
+}
+
 - (void)follow {
     _ticks++;
     BOOL selfActive = NSApp.isActive, hostActive = [self hostIsActive];
@@ -174,6 +191,8 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
         _lastFrame = frame;
     }
     if (self.window.contentView.layer.cornerRadius != t.radius) self.window.contentView.layer.cornerRadius = t.radius;
+    // 只在这里升上去；降下来要等别的应用激活的通知，见 appActivated
+    if (watching) [self raise];
     if (!_shown) {
         self.window.alphaValue = 0;
         [self.window orderWindow:NSWindowAbove relativeTo:_host];
@@ -229,7 +248,14 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
 
 - (void)appActivated:(NSNotification *)note {
     NSRunningApplication *app = note.userInfo[NSWorkspaceApplicationKey];
-    if (!_hasHost || app.processIdentifier != _hostPid) return;
+    if (app == nil) return;
+    if (app.processIdentifier != _hostPid) {
+        // 到了第三个应用：不再压在别的窗口上面。在 Rex 和网页窗口之间来回时不降，
+        // 那时谁的激活都可能先到，降早了 Rex 的窗口又会盖住网页
+        if (app.processIdentifier != getpid()) [self lower];
+        return;
+    }
+    if (!_hasHost) return;
     // Rex 把它的窗口提到了网页窗口上面，马上回到上面去
     if (_shown) [self.window orderWindow:NSWindowAbove relativeTo:_host];
     rexwvHostActivated();
