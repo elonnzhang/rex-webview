@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -124,5 +125,42 @@ func TestFollowerStopsAllCommands(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("follower did not stop its commands")
+	}
+}
+
+// 切到别的会话的 tab 只能从 App 的设置里看出来，要很快发现，网页窗口才能马上让开。
+func TestFollowerNoticesShownSessionQuickly(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var mu sync.Mutex
+	shown := `{"sessionID":"s"}`
+	pref := func(k string) (string, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		return shown, k == "lastFocusedSession"
+	}
+	f := newFollower("s", "b", waitingRex{make(chan string, 8)}, pref)
+	f.ctx = ctx
+	f.work.Go(func() { f.run(ctx) })
+	defer f.work.Wait()
+	defer cancel()
+	current := func() string {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.shown
+	}
+	deadline := time.Now().Add(time.Second)
+	for current() != "s" && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	mu.Lock()
+	shown = `{"sessionID":"other"}`
+	mu.Unlock()
+	start := time.Now()
+	for current() != "other" {
+		if time.Since(start) > 200*time.Millisecond {
+			t.Fatalf("shown session still %q after %v", current(), time.Since(start))
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

@@ -37,6 +37,10 @@ func TestFloatingFrame(t *testing.T) {
 		if !out.Visible || out.Frame != want {
 			t.Errorf("%s: frame = %+v, visible %t; want %+v", label, out.Frame, out.Visible, want)
 		}
+		// 窗格连同标题栏：点在这里面不算点了 Rex 的别处
+		if pane := (rect{want.X, want.Y - f.chrome.Header, want.W, want.H + f.chrome.Header}); out.Pane != pane {
+			t.Errorf("%s: pane = %+v; want %+v", label, out.Pane, pane)
+		}
 	}
 	// 布局区宽 1600、高 1000。浮层外框 (308,342)-(1108,842)，留 1 点原生描边和 36 点标题栏。
 	host := rect{100, 50, 1931, 1050}

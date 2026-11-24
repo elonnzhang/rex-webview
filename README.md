@@ -2,13 +2,13 @@
 
 [English](README.en.md)
 
-用 Go 在 Rex 窗格里显示网页。SDK 把 MyGo 的 WebKit 窗口对齐到本机 Rex 窗格，跟随分屏、缩放和焦点。从普通终端启动同一程序会打开独立窗口。需要 macOS、cgo 和 Go 1.27.3 或更新版本。
+用 Go 在 Rex 窗格里显示网页。SDK 把 MyGo 的 WebKit 窗口对齐到本机 Rex 窗格，跟随分屏、缩放和焦点。从普通终端启动同一程序会打开独立窗口。需要 macOS 和 Go 1.27.3 或更新版本。cgo 可选：`CGO_ENABLED=0` 时窗口桥接改用 purego 直接调 AppKit，功能相同。
 
 ## 试一下
 
 在 Rex 的平铺窗格里进入仓库目录，运行 `go run ./examples/hello`。点一下网页，按 **⌘W** 关闭，或按 **⌘Q** 退出这个 WebView 应用。用同一个 shell 启动时，退出后会回到提示符。示例把 HTML 编入程序，通过 `data:` URL 加载，无需启动服务器。[示例源码](examples/hello/main.go)
 
-在已有的 Rex **浮动窗格**里运行 `go run ./examples/hello -float` 即可试用实验性跟随。该参数只开启跟随，窗格的创建、移动和层级仍由 Rex 控制。
+示例默认也跟随 Rex **浮动窗格**（实验性），在已有的浮动窗格里直接运行即可；加 `-float=false` 只跟平铺窗格。该参数只控制跟随，窗格的创建、移动和层级仍由 Rex 控制。
 
 要在窗格里打开自己的网页，运行 `go run ./examples/url 'http://localhost:3000'`。把地址换成正在运行的服务的完整 URL。省略地址时，示例打开 Google。
 
@@ -73,7 +73,7 @@ SDK 根据本地 Rex 设置估算标题栏、侧边栏和间距。浮层内边�
 
 ## 验证
 
-`go test ./...` 和 `go vet ./...` 无需 Rex。在有图形会话的 macOS 上运行 `REXWEBVIEW_TEST_OFFSCREEN=1 go test -race -count=1 ./...`，会额外验证真实 WebKit 渲染、窗口配置、自定义关闭和窗格消失退出。
+`go test ./...` 和 `go vet ./...` 无需 Rex。在有图形会话的 macOS 上运行 `REXWEBVIEW_TEST_OFFSCREEN=1 go test -race -count=1 ./...`，会额外验证真实 WebKit 渲染、窗口配置、自定义关闭和窗格消失退出。以上命令前加 `CGO_ENABLED=0` 可以测试不用 cgo 的窗口桥接，`-race` 需要 cgo，这时要去掉。两种构建的测试结果和性能对比见[测试报告](docs/test-report.md)。
 
 要验证 URL 示例，运行 `REXWEBVIEW_TEST_URL_GUI=1 go test -count=1 ./examples/url`。测试在后台打开一个独立窗口，访问临时的本地 HTTP 服务，然后关闭窗口。
 

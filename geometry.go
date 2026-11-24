@@ -255,7 +255,7 @@ func shownSession(pref func(name string) (string, bool)) string {
 
 // ---- 按键 ----
 
-// 修饰键写在前面，固定按这个顺序；pane_darwin.m 里的 rexwv_chord 也是这个顺序。
+// 修饰键写在前面，固定按这个顺序；pane_darwin.m 的 rexwv_chord 和 native_purego_darwin.go 的 eventChord 也是这个顺序。
 var chordMods = []string{"ctrl", "alt", "shift", "cmd"}
 
 var (

@@ -9,6 +9,7 @@ typedef struct {
     int visible;
     double x, y, w, h; // 屏幕上的位置，原点在主屏幕左上角
     double radius;
+    double px, py, pw, ph; // 整个窗格连同标题栏
     int focused;
     int focus; // 0 不动，1 网页窗口接管键盘，2 还给 Rex
 } RexWVTick;

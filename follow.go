@@ -11,10 +11,14 @@ import (
 
 // follower 让网页窗口跟着 Rex 里的一个窗格：布局从 session.view 来，会话有事件时重新取；
 // Rex 的界面占了多少从它的设置里读，每秒读一次。窗口每一帧来问一次 tick，该在哪、该不该显示、焦点该给谁。
-// 做法照着 leaf 的 src/browser.swift。这里只有逻辑，真正动窗口的在 pane_darwin.m。
+// 做法照着 leaf 的 src/browser.swift。这里只有逻辑，真正动窗口的在 pane_darwin.m（cgo）或 native_purego_darwin.go（不开 cgo）。
 
 // settleTime 是窗格换了位置后先让开多久。Rex 挪窗格带动画，跟着动画走会慢半拍，等它停稳了再回来。
 const settleTime = 100 * time.Millisecond
+
+// shownPoll 是多久看一次 Rex 眼下显示哪个会话。切到别的会话的 tab 时服务器不发事件，只能看 App 的设置；
+// 读一次只要几微秒，看得勤一点，网页窗口才能跟着马上让开。
+const shownPoll = 30 * time.Millisecond
 
 // rexAPI 是 follower 用到的 rex 命令行，测试里换成假的。
 type rexAPI interface {
@@ -75,10 +79,32 @@ func (f *follower) loadPrefs() {
 	f.appearance(look)
 }
 
+// loadShown 只重新读 Rex 眼下显示的会话。
+func (f *follower) loadShown() {
+	f.syncPrefs()
+	shown := shownSession(f.pref)
+	f.mu.Lock()
+	f.shown = shown
+	f.mu.Unlock()
+}
+
 // run 一直跟到 ctx 取消。
 func (f *follower) run(ctx context.Context) {
 	f.loadPrefs()
 	f.work.Go(func() { f.loadBindings(ctx) })
+	// 单独一个循环：下面取布局的 rex 命令可能卡上好几秒，不能耽误它
+	f.work.Go(func() {
+		t := time.NewTicker(shownPoll)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				f.loadShown()
+			}
+		}
+	})
 	f.work.Go(func() {
 		for ctx.Err() == nil {
 			_ = f.rex.Stream(ctx, func(line []byte) {
@@ -188,6 +214,7 @@ const (
 type tickOut struct {
 	Visible bool
 	Frame   rect // 屏幕上的位置，原点在主屏幕左上角
+	Pane    rect // 整个窗格连同标题栏在屏幕上的位置，同样的原点
 	Radius  float64
 	Focused bool // 窗格是不是 Rex 里有焦点的那个
 	Focus   int
@@ -221,6 +248,7 @@ func (f *follower) tick(in tickIn) tickOut {
 		return out
 	}
 	out.Visible, out.Frame, out.Radius = true, body, f.chrome.Radius
+	out.Pane = rect{body.X, body.Y - f.chrome.Header, body.W, body.H + f.chrome.Header}
 	return out
 }
 

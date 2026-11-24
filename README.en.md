@@ -2,13 +2,13 @@
 
 [中文](README.md)
 
-Display a web page in a Rex pane from Go. The SDK aligns a MyGo WebKit window with the local Rex pane and follows splits, zoom and focus. Starting the same program from a regular terminal opens a standalone window. Requires macOS, cgo and Go 1.27.3 or later.
+Display a web page in a Rex pane from Go. The SDK aligns a MyGo WebKit window with the local Rex pane and follows splits, zoom and focus. Starting the same program from a regular terminal opens a standalone window. Requires macOS and Go 1.27.3 or later. cgo is optional: with `CGO_ENABLED=0` the window bridge calls AppKit through purego with the same behavior.
 
 ## Try it
 
 From the repository in a tiled Rex pane, run `go run ./examples/hello`. Click the page and press **⌘W** to close it or **⌘Q** to quit the WebView app. If you started it from a shell prompt, you return to that prompt. The example embeds HTML and loads it from a `data:` URL, so it runs without a server. [Example source](examples/hello/main.go)
 
-To try experimental tracking in an existing **floating Rex pane**, run `go run ./examples/hello -float` there. The flag enables tracking. Rex owns pane creation, movement and stacking.
+The example also follows **floating Rex panes** by default (experimental), so you can run it in an existing floating pane. Pass `-float=false` to follow tiled panes only. The flag only controls tracking. Rex owns pane creation, movement and stacking.
 
 To open your own page in the pane, run `go run ./examples/url 'http://localhost:3000'`. Replace the address with the full URL of your running service. Omit the URL to open Google.
 
@@ -73,7 +73,7 @@ The SDK estimates headers, sidebar width and gaps from local Rex preferences. Fl
 
 ## Verification
 
-`go test ./...` and `go vet ./...` run without Rex. In a graphical macOS session, `REXWEBVIEW_TEST_OFFSCREEN=1 go test -race -count=1 ./...` also exercises WebKit rendering, window options, custom close handling and shutdown when the pane disappears.
+`go test ./...` and `go vet ./...` run without Rex. In a graphical macOS session, `REXWEBVIEW_TEST_OFFSCREEN=1 go test -race -count=1 ./...` also exercises WebKit rendering, window options, custom close handling and shutdown when the pane disappears. Prefix these commands with `CGO_ENABLED=0` to test the window bridge that does not use cgo, and drop `-race`, which needs cgo. The [test report](docs/test-report.md) (in Chinese) compares results and performance for both builds.
 
 To test the URL example, run `REXWEBVIEW_TEST_URL_GUI=1 go test -count=1 ./examples/url`. The test opens a standalone window in the background, visits a temporary local HTTP server, and closes the window.
 

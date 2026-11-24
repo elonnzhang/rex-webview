@@ -1,24 +1,27 @@
-//go:build darwin && cgo
+//go:build darwin
 
 package rexwebview
-
-/*
-#cgo CFLAGS: -fobjc-arc -Wno-deprecated-declarations
-#cgo LDFLAGS: -framework Cocoa
-#include <stdlib.h>
-#include "pane_darwin.h"
-*/
-import "C"
 
 import (
 	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/egoist/mygo"
 )
+
+// 原生窗口桥接有两份实现：开了 cgo 用 pane_darwin.m（native_cgo_darwin.go），
+// 没开时用 purego 直接调 AppKit 和 CoreGraphics（native_purego_darwin.go）。两份都提供：
+//
+//	nativeIsMainThread() bool
+//	nativeAttach(window uintptr)  // 主线程，给 MyGo 的隐藏窗口接上覆盖层
+//	nativeDetach()                // 主线程
+//	nativeActivateHost()          // 任意线程，异步让 Rex 到前面来
+//	nativePref(key string) (string, bool)
+//	nativePrefSync()
+//
+// 桥接层每帧调 paneTick，按键调 paneKey，Rex 到前面来时调 paneHostActivated，都在主线程。
 
 var (
 	appStarted   atomic.Bool
@@ -26,7 +29,7 @@ var (
 )
 
 func (h *Host) run(parent context.Context) error {
-	if C.rexwv_is_main_thread() == 0 {
+	if !nativeIsMainThread() {
 		return errors.New("rex-webview: call Run from the main goroutine")
 	}
 	if !appStarted.CompareAndSwap(false, true) {
@@ -81,7 +84,7 @@ func (h *Host) run(parent context.Context) error {
 			}
 		})
 		if f != nil {
-			f.syncPrefs = func() { C.rexwv_pref_sync() }
+			f.syncPrefs = nativePrefSync
 			f.appearance = func(name string) {
 				source := mygo.ThemeSource(name)
 				if source != mygo.ThemeLight && source != mygo.ThemeDark {
@@ -104,9 +107,9 @@ func (h *Host) run(parent context.Context) error {
 			f.ctx = ctx
 			if overlay {
 				paneFollower = f
-				f.activateHost = func() { C.rexwv_activate_host() }
+				f.activateHost = nativeActivateHost
 				win.OnFocus(func() { f.work.Go(f.becameKey) })
-				C.rexwv_attach_overlay(C.uintptr_t(win.NativeHandle()))
+				nativeAttach(win.NativeHandle())
 			}
 			f.work.Go(func() { f.run(ctx) })
 		}
@@ -123,7 +126,7 @@ func (h *Host) run(parent context.Context) error {
 	}
 	cancel()
 	if paneFollower != nil {
-		C.rexwv_detach_overlay()
+		nativeDetach()
 		paneFollower = nil
 	}
 	if f != nil {
@@ -169,45 +172,21 @@ func defaultMenu(title string, requestClose func()) *mygo.Menu {
 	})
 }
 
-func rexPref(name string) (string, bool) {
-	cs := C.CString(name)
-	defer C.free(unsafe.Pointer(cs))
-	v := C.rexwv_pref(cs)
-	if v == nil {
-		return "", false
+func rexPref(name string) (string, bool) { return nativePref(name) }
+
+func paneTick(in tickIn) tickOut {
+	if f := paneFollower; f != nil {
+		return f.tick(in)
 	}
-	defer C.free(unsafe.Pointer(v))
-	return C.GoString(v), true
+	return tickOut{}
 }
 
-//export rexwvTick
-func rexwvTick(found C.int, x, y, w, h C.double, hostActive, selfActive C.int, out *C.RexWVTick) {
+func paneKey(chord string) bool {
 	f := paneFollower
-	if f == nil {
-		return
-	}
-	t := f.tick(tickIn{HostFound: found != 0, Host: rect{float64(x), float64(y), float64(w), float64(h)}, HostActive: hostActive != 0, SelfActive: selfActive != 0})
-	if t.Visible {
-		out.visible = 1
-	}
-	out.x, out.y, out.w, out.h = C.double(t.Frame.X), C.double(t.Frame.Y), C.double(t.Frame.W), C.double(t.Frame.H)
-	out.radius = C.double(t.Radius)
-	if t.Focused {
-		out.focused = 1
-	}
-	out.focus = C.int(t.Focus)
+	return f != nil && f.key(chord)
 }
 
-//export rexwvKey
-func rexwvKey(chord *C.char) C.int {
-	if f := paneFollower; f != nil && f.key(C.GoString(chord)) {
-		return 1
-	}
-	return 0
-}
-
-//export rexwvHostActivated
-func rexwvHostActivated() {
+func paneHostActivated() {
 	if f := paneFollower; f != nil {
 		f.refreshSoon()
 	}

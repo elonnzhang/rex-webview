@@ -26,6 +26,10 @@ static RexWVPane *pane;
     BOOL _focusWhenShown; // 一显示出来就接管键盘
     BOOL _focused;        // 窗格是不是 Rex 里有焦点的那个
     NSRect _lastFrame;
+    CGRect _pane;         // 整个窗格连同标题栏，原点在主屏幕左上角
+    id _clickMonitor;     // 全局鼠标监听
+    CGPoint _click;       // 最近一次点在别的应用里的位置，原点在主屏幕左上角
+    NSDate *_clickAt;
     NSDate *_forwardedAt; // 上一次把键转给 Rex 的时候
 }
 
@@ -139,6 +143,7 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
     RexWVTick t = {0};
     rexwvTick(found, host.origin.x, host.origin.y, host.size.width, host.size.height, hostActive, selfActive, &t);
     _focused = t.focused != 0;
+    _pane = CGRectMake(t.px, t.py, t.pw, t.ph);
     if (!_focused || !hostActive) _focusWhenShown = NO;
     if (t.focus == 1) {
         _focusWhenShown = YES;
@@ -207,6 +212,21 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
     [app activateWithOptions:0];
 }
 
+// 最近 0.75 秒里点过鼠标、点在这个窗格外面：用户是点了 Rex 的侧栏、别的窗格才回到 Rex 的。
+// 点击由全局鼠标监听记下来，它和激活通知谁先到不一定，所以等激活 0.25 秒后再问。
+- (BOOL)clickedOutside {
+    if (_clickAt == nil || -_clickAt.timeIntervalSinceNow > 0.75) return NO;
+    return !CGRectContainsPoint(_pane, _click);
+}
+
+- (void)recordClick {
+    NSScreen *primary = NSScreen.screens.firstObject;
+    if (primary == nil) return;
+    NSPoint m = NSEvent.mouseLocation; // 原点在主屏幕左下角
+    _click = CGPointMake(m.x, primary.frame.size.height - m.y);
+    _clickAt = [NSDate date];
+}
+
 - (void)appActivated:(NSNotification *)note {
     NSRunningApplication *app = note.userInfo[NSWorkspaceApplicationKey];
     if (!_hasHost || app.processIdentifier != _hostPid) return;
@@ -217,6 +237,8 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
     // 也可能是点了 Rex 里别的窗格才到前面来的，那样焦点马上就不在这里了
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (!self->_shown || self->_covered || !self->_focused || ![self hostIsActive]) return;
+        // 点了 Rex 里别处（比如侧栏里的 tab）：键盘留给 Rex。抢回来的话，这一下点击白点，tab 切不过去
+        if ([self clickedOutside]) return;
         if (self->_forwardedAt != nil && -self->_forwardedAt.timeIntervalSinceNow < 1) return;
         [self takeFocus];
     });
@@ -278,6 +300,12 @@ static NSString *rexwv_chord(NSEvent *event) {
     _keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
         return [self handleKey:event] ? nil : event;
     }];
+    // 点在别的应用里的鼠标。全局监听鼠标事件不需要辅助功能权限
+    _clickMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown |
+                                                                   NSEventMaskOtherMouseDown
+                                                           handler:^(NSEvent *event) {
+                                                               [self recordClick];
+                                                           }];
     [self pickHost];
     [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self
                                                       selector:@selector(appActivated:)
@@ -293,6 +321,8 @@ static NSString *rexwv_chord(NSEvent *event) {
     _timer = nil;
     if (_keyMonitor != nil) [NSEvent removeMonitor:_keyMonitor];
     _keyMonitor = nil;
+    if (_clickMonitor != nil) [NSEvent removeMonitor:_clickMonitor];
+    _clickMonitor = nil;
     [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self];
     self.window = nil;
 }
