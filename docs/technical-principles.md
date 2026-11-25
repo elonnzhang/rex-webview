@@ -4,7 +4,7 @@
 
 ## 什么时候跟随窗格
 
-[`New`](../host.go) 只在 `REX_SESSION` 和 `REX_BLOCK` 都有值时创建窗格跟随器。这一步检查 `rex` 可执行文件，不连接服务器。缺少任一变量时，宿主按独立窗口模式运行，不需要安装 Rex。
+[`New`](../host.go) 用 `REX_BLOCK` 识别窗格。没有窗格 ID 时使用独立窗口，不需要安装 Rex。有窗格 ID 时优先使用 `REX_SESSION`；从 Rex preview.23 起，新窗格不再设置这个变量，`New` 会调用一次 `rex whoami --json` 读取 `session_id`。`session.view` 需要会话 ID，不能拿窗格 ID 代替。查询失败时 `New` 返回错误，不会启动 Rex 服务器或改用独立窗口。
 
 [`Run`](../pane_darwin.go) 从 `main` 启动 MyGo 的事件循环，一个进程只能运行一个宿主一次。窗口起初隐藏：在普通终端里，宿主装好回调后直接显示窗口；在 Rex 里，由跟随器决定何时显示。`Offscreen` 让窗口一直隐藏，在 Rex 里仍会跟踪布局，但不安装用于摆放窗口和接收快捷键的原生覆盖层。
 

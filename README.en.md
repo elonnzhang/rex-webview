@@ -41,7 +41,7 @@ func main() {
 
 | Option | What it controls |
 | --- | --- |
-| `Title`, `RexBin` | Initial title and Rex executable path. With both `REX_SESSION` and `REX_BLOCK` set, the SDK follows the pane. The default executable lookup checks `$REX_BIN_DIR/rex`, then `PATH`. |
+| `Title`, `RexBin` | Initial title and Rex executable path. `REX_BLOCK` identifies the pane to follow. If `REX_SESSION` is unset, the SDK gets the session ID from `rex whoami --json`. The default executable lookup checks `$REX_BIN_DIR/rex`, then `PATH`. |
 | `Menu` | Supply `func(requestClose func()) *mygo.Menu` to build a complete native menu with your own labels and accelerators. Call `requestClose()` from your Close action. The default menu offers Close and Quit. |
 | `ReservedKeys` | Keep keys such as `[]string{"cmd+s"}` available to the page or native menu. Other matching shortcuts can go to Rex. `cmd+w` and `cmd+q` always stay with the app. |
 | `OnClose`, `OnPaneGone` | Both default to quitting. To save first, cancel the context passed to `Run` after saving successfully. Leave it active to keep the page open for another attempt. `OnPaneGone` runs separately, once, when the pane disappears. Both callbacks run on background goroutines. Canceling the context directly bypasses the close-request callback. |

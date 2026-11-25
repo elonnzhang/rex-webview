@@ -41,7 +41,7 @@ func main() {
 
 | 选项 | 用法 |
 | --- | --- |
-| `Title`、`RexBin` | 设置初始标题和 Rex 可执行文件路径。有 `REX_SESSION` 和 `REX_BLOCK` 时才跟随 Rex。可执行文件默认从 `$REX_BIN_DIR/rex`、`PATH` 顺序查找。 |
+| `Title`、`RexBin` | 设置初始标题和 Rex 可执行文件路径。`REX_BLOCK` 指定要跟随的窗格。没有 `REX_SESSION` 时，SDK 通过 `rex whoami --json` 获取会话 ID。可执行文件默认从 `$REX_BIN_DIR/rex`、`PATH` 顺序查找。 |
 | `Menu` | 传入 `func(requestClose func()) *mygo.Menu`，应用自己提供完整的原生菜单、翻译和快捷键。关闭动作调用 `requestClose()`。默认菜单提供关闭和退出。 |
 | `ReservedKeys` | 例如 `[]string{"cmd+s"}`。把这些键留给页面或原生菜单处理，其他已匹配的快捷键可转给 Rex。`cmd+w` 和 `cmd+q` 始终留给应用。 |
 | `OnClose`、`OnPaneGone` | 默认关闭宿主。需要保存时，在回调里保存成功后取消传给 `Run` 的 context，保存失败可以保留页面重试。`OnPaneGone` 在窗格消失时单独调用一次。两者在后台 goroutine 上执行，直接取消 context 会跳过关闭请求回调。 |
