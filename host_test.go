@@ -5,13 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
 func TestHostOutsideRex(t *testing.T) {
-	t.Setenv("REX_SESSION", "one-variable-is-not-enough")
+	t.Setenv("REX_SESSION", "session:without-a-block")
 	t.Setenv("REX_BLOCK", "")
 	keys := []string{"Command+Shift+S"}
 	h, err := New(Options{URL: "about:blank", RexBin: "/no/such/rex", ReservedKeys: keys})
@@ -78,6 +79,46 @@ func TestHostWhereAndRexLookup(t *testing.T) {
 	out["rect"].([]float64)[0] = -1
 	if got := h.Where(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("Where = %#v", got)
+	}
+}
+
+func TestHostBlockOnly(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "rex")
+	const script = `#!/bin/sh
+[ "$#" = 3 ] && [ "$1" = --autostart=false ] && [ "$2" = whoami ] && [ "$3" = --json ] && [ "$REX_BLOCK" = block:web ] || exit 2
+printf '%s\n' "$WHOAMI_REPLY"
+exit "$WHOAMI_STATUS"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("REX_BLOCK", "block:web")
+	for _, tc := range []struct{ name, session, reply, status, wantErr string }{
+		{"block only", "", `{"session_id":"session:one","block_id":"block:web"}`, "0", ""},
+		{"blank session", " \t", `{"session_id":"session:one"}`, "0", ""},
+		{"no session in reply", "", `{"block_id":"block:web"}`, "0", "session_id"},
+		{"invalid JSON", "", `not JSON`, "0", "whoami"},
+		{"command failure", "", "", "1", "whoami"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("REX_SESSION", tc.session)
+			t.Setenv("WHOAMI_REPLY", tc.reply)
+			t.Setenv("WHOAMI_STATUS", tc.status)
+			h, err := New(Options{URL: "about:blank", RexBin: bin})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("New error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[string]any{"session": "session:one", "block": "block:web", "placed": false}
+			if got := h.Where(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("Where = %#v, want %#v", got, want)
+			}
+		})
 	}
 }
 

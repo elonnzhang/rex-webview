@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/egoist/mygo"
 )
@@ -55,9 +56,14 @@ type Host struct {
 	follower *follower
 }
 
-// New validates the options and detects Rex from REX_SESSION and REX_BLOCK.
-// It does not open a window or connect to Rex.
+// New validates the options and detects a Rex pane from REX_BLOCK. If REX_SESSION
+// is unset, it asks the running Rex server for the pane's session ID.
+// It does not open a window or start a server.
 func New(opts Options) (*Host, error) {
+	return newHost(context.Background(), opts)
+}
+
+func newHost(ctx context.Context, opts Options) (*Host, error) {
 	u, err := url.Parse(opts.URL)
 	if err != nil || !u.IsAbs() {
 		return nil, errors.New("rexwebview: URL must be an absolute URL")
@@ -72,12 +78,17 @@ func New(opts Options) (*Host, error) {
 		opts.ReservedKeys[i] = chord
 	}
 	h := &Host{opts: opts}
-	if session, block := os.Getenv("REX_SESSION"), os.Getenv("REX_BLOCK"); session != "" && block != "" {
+	if block := strings.TrimSpace(os.Getenv("REX_BLOCK")); block != "" {
 		bin, err := findRex(opts.RexBin)
 		if err != nil {
 			return nil, fmt.Errorf("rexwebview: find rex executable: %w", err)
 		}
-		h.follower = newFollower(session, block, rexCLI{bin}, rexPref)
+		cli := rexCLI{bin}
+		session, err := cli.sessionID(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("rexwebview: find session for %s: %w", block, err)
+		}
+		h.follower = newFollower(session, block, cli, rexPref)
 		h.follower.reservedKeys = opts.ReservedKeys
 		h.follower.floatingPanes = opts.ExperimentalFloatingPanes
 	}
@@ -118,8 +129,11 @@ func (h *Host) Where() any {
 // Run opens a page and runs the event loop on the main goroutine.
 // Use New when the application also needs the host's Rex placement.
 func Run(ctx context.Context, opts Options) error {
-	h, err := New(opts)
+	h, err := newHost(ctx, opts)
 	if err != nil {
+		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			return nil
+		}
 		return err
 	}
 	return h.Run(ctx)
