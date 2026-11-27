@@ -45,18 +45,24 @@ type follower struct {
 
 	kick chan struct{} // 该重新取布局了
 
-	mu           sync.Mutex
-	chrome       chrome
-	shown        string // Rex 眼下显示的会话，空的是不知道
-	place        *placement
-	settleUntil  time.Time
-	missing      int
-	wasFocused   bool
-	focusDirty   bool     // 取到了新的布局，下一次 tick 要对一下焦点
-	reservedKeys []string // 留给调用方处理的按键
-	bindings     []binding
-	prefix       []string // 按了一半的一串键
-	appClient    string
+	mu             sync.Mutex
+	chrome         chrome
+	shown          string // Rex 眼下显示的会话，空的是不知道
+	place          *placement
+	drag           *floatDrag // 原生鼠标事件驱动的浮窗拖动预览
+	refreshSeq     uint64     // 已开始的布局查询
+	appliedSeq     uint64     // 最近完成并应用的布局查询
+	settleUntil    time.Time
+	missing        int
+	wasFocused     bool
+	focusDirty     bool   // 取到了新的布局，下一次 tick 要对一下焦点
+	reclaimToken   uint64 // 接回焦点的请求；请求之前开始的布局查询不能用来接回焦点
+	reclaimPending bool
+	reclaimReady   bool
+	reservedKeys   []string // 留给调用方处理的按键
+	bindings       []binding
+	prefix         []string // 按了一半的一串键
+	appClient      string
 }
 
 func newFollower(session, block string, rex rexAPI, pref func(string) (string, bool)) *follower {
@@ -164,16 +170,39 @@ func changesLayout(line []byte) bool {
 }
 
 func (f *follower) refresh(ctx context.Context) {
+	f.mu.Lock()
+	token := f.reclaimToken
+	f.refreshSeq++
+	seq := f.refreshSeq
+	f.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	view, err := f.rex.Call(ctx, "session.view", map[string]any{"session_id": f.session})
 	if err != nil || view == nil {
 		f.mu.Lock()
 		f.place = nil
+		if token == f.reclaimToken {
+			f.reclaimPending, f.reclaimReady = false, false
+		}
 		f.mu.Unlock()
 		return
 	}
 	f.apply(view)
+	f.mu.Lock()
+	f.appliedSeq = seq
+	if f.reclaimPending && token == f.reclaimToken {
+		f.reclaimReady = true
+	}
+	f.mu.Unlock()
+}
+
+// requestFocusAfterRefresh 用新查询确认焦点，避免面板关闭或 Rex 激活时拿旧布局抢回键盘。
+func (f *follower) requestFocusAfterRefresh() {
+	f.mu.Lock()
+	f.reclaimToken++
+	f.reclaimPending, f.reclaimReady = true, false
+	f.mu.Unlock()
+	f.refreshSoon()
 }
 
 // apply 收下一份新的布局。
@@ -188,7 +217,7 @@ func (f *follower) apply(view map[string]any) {
 		return
 	}
 	next := place(view, f.block, f.floatingPanes)
-	if (next == nil) != (f.place == nil) || (next != nil && (next.Rect != f.place.Rect || next.gapOffset != f.place.gapOffset || next.floating != f.place.floating)) {
+	if !next.followsLayer(f.place) && ((next == nil) != (f.place == nil) || (next != nil && (next.Rect != f.place.Rect || next.gapOffset != f.place.gapOffset || next.floating != f.place.floating))) {
 		f.settleUntil = f.now().Add(settleTime)
 	}
 	f.place = next
@@ -201,13 +230,15 @@ type tickIn struct {
 	HostFound              bool
 	Host                   rect
 	HostActive, SelfActive bool
+	ReclaimBlocked         bool // 刚转发给 Rex 的快捷键仍在 1 秒保护期内
 }
 
 // 焦点该怎么动。
 const (
-	focusKeep = iota
-	focusTake // 网页窗口接管键盘
-	focusHost // 把键盘还给 Rex
+	focusKeep    = iota
+	focusTake    // 网页窗口接管键盘
+	focusHost    // 把键盘还给 Rex
+	focusReclaim // 新布局确认后接回键盘；原生层还须检查用户点击和刚转发的按键
 )
 
 // tickOut 是 follower 的回答。
@@ -224,13 +255,17 @@ func (f *follower) tick(in tickIn) tickOut {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out tickOut
+	shown := f.shown == "" || f.shown == f.session
+	if !shown {
+		f.reclaimPending, f.reclaimReady = false, false
+	}
 	out.Focused = f.place != nil && f.place.Focused
 	if f.focusDirty {
 		f.focusDirty = false
 		switch {
-		case out.Focused && !f.wasFocused && in.HostActive:
+		case out.Focused && !f.wasFocused && in.HostActive && shown && !f.reclaimPending:
 			out.Focus = focusTake
-		case !out.Focused && f.wasFocused && in.SelfActive:
+		case !out.Focused && f.wasFocused && in.SelfActive && shown:
 			// Rex 把焦点挪到别的窗格了：转发过去的键，或者别处调的 API
 			out.Focus = focusHost
 		}
@@ -240,15 +275,24 @@ func (f *follower) tick(in tickIn) tickOut {
 		return out
 	}
 	// Rex 换到别的会话去了，窗格不在画面上
-	if f.shown != "" && f.shown != f.session {
+	if !shown {
 		return out
 	}
 	body := f.chrome.body(*f.place, in.Host)
-	if body.W <= 80 || body.H <= 60 {
+	if body.W <= 80 || body.H <= 60 || f.chrome.covered(*f.place, body, in.Host) {
 		return out
 	}
 	out.Visible, out.Frame, out.Radius = true, body, f.chrome.Radius
+	if f.place.floating {
+		out.Radius = 10
+	}
 	out.Pane = rect{body.X, body.Y - f.chrome.Header, body.W, body.H + f.chrome.Header}
+	if f.reclaimPending && f.reclaimReady && (!out.Focused || !in.HostActive || !in.ReclaimBlocked) {
+		f.reclaimPending, f.reclaimReady = false, false
+		if out.Focused && in.HostActive {
+			out.Focus = focusReclaim
+		}
+	}
 	return out
 }
 

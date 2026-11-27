@@ -9,12 +9,16 @@ func TestAppAndRexShortcuts(t *testing.T) {
 		{"keys":["cmd+q","a"],"action":"quit-prefix"},
 		{"keys":["cmd+l","cmd+w"],"action":"close-suffix"},
 		{"keys":["cmd+j","p"],"action":"custom-jump"}
+		,{"keys":["ctrl+h"],"action":"pane.resize.left","mode":"resize"}
 	]}`)
 	if hit, _ := matchKeys(parseBindings(keymap, nil), []string{"cmd+s"}); hit == nil || hit.Action != "custom-save" {
 		t.Fatal("the SDK reserved an application-specific key by default")
 	}
 	reserved := []string{"cmd+s", "cmd+t"}
 	bindings := parseBindings(keymap, reserved)
+	if hit, more := matchKeys(bindings, []string{"ctrl+h"}); hit != nil || more {
+		t.Fatal("a binding from Rex's inactive key mode was forwarded")
+	}
 	for _, key := range []string{"cmd+s", "cmd+t", "cmd+q", "cmd+l"} {
 		if hit, more := matchKeys(bindings, []string{key}); hit != nil || more {
 			t.Errorf("reserved key or unreachable prefix forwarded: %s", key)

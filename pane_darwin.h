@@ -11,7 +11,7 @@ typedef struct {
     double radius;
     double px, py, pw, ph; // 整个窗格连同标题栏
     int focused;
-    int focus; // 0 不动，1 网页窗口接管键盘，2 还给 Rex
+    int focus; // 0 不动，1 网页窗口接管键盘，2 还给 Rex，3 新布局确认后恢复
 } RexWVTick;
 
 // 在主线程给 MyGo 的隐藏窗口接上覆盖层。等跟到窗格再显示。

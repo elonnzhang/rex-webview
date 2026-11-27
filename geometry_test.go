@@ -2,6 +2,7 @@ package rexwebview
 
 import (
 	"encoding/json/v2"
+	"reflect"
 	"testing"
 )
 
@@ -17,7 +18,8 @@ func TestPanePlacement(t *testing.T) {
 	check := func(want *placement) {
 		t.Helper()
 		got := place(view, "pad", false)
-		if (got == nil) != (want == nil) || (got != nil && *got != *want) {
+		got = visiblePlacement(got)
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("place = %+v; want %+v", got, want)
 		}
 	}
@@ -56,7 +58,8 @@ func TestFloatingSplitPlacement(t *testing.T) {
 	check := func(block string, enabled bool, want *placement) {
 		t.Helper()
 		got := place(view, block, enabled)
-		if (got == nil) != (want == nil) || (got != nil && *got != *want) {
+		got = visiblePlacement(got)
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("place(%q, floating=%v) = %+v; want %+v", block, enabled, got, want)
 		}
 	}
@@ -78,6 +81,21 @@ func TestFloatingSplitPlacement(t *testing.T) {
 	delete(layers[2].(map[string]any), "state")
 	win["zoomed_block_id"] = "right"
 	check("right", true, &placement{Rect: rect{0, 0, 1, 1}, Focused: true})
+}
+
+// 这些布局用相同的平铺／浮层画布；额外的层信息由屏幕坐标回归测试覆盖。
+func visiblePlacement(p *placement) *placement {
+	if p == nil {
+		return nil
+	}
+	c := chromeFrom(func(string) (string, bool) { return "", false })
+	win := rect{0, 0, 1000, 700}
+	if c.covered(*p, c.body(*p, win), win) {
+		return nil
+	}
+	copy := *p
+	copy.layerBounds, copy.layerID, copy.upperLayers = nil, "", nil
+	return &copy
 }
 
 func TestPaneBody(t *testing.T) {

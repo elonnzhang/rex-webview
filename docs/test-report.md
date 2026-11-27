@@ -4,6 +4,37 @@
 
 窗口桥接有两份实现。开 cgo 时用 [pane_darwin.m](../pane_darwin.m)，`CGO_ENABLED=0` 时用 [native_purego_darwin.go](../native_purego_darwin.go)。两份的逻辑一一对应，布局计算和事件订阅都在共用的 Go 代码里。
 
+## 2026-11-27：同步 Leaf Browser 和底部标签修正
+
+本轮使用 Go 1.27.4 darwin/arm64，参考 Leaf 当前的 `src/browser.swift` 和 [PR #87](https://github.com/DeepanshuMishraa/leaf/pull/87)。以下性能数据仍是 2026-11-24 的记录，本轮未重测性能。
+
+| 验证 | 结果 |
+| --- | --- |
+| `REXWEBVIEW_TEST_OFFSCREEN=1 REXWEBVIEW_TEST_URL_GUI=1 go test -race -count=1 ./...` | 通过，38 项检查 |
+| `CGO_ENABLED=0 REXWEBVIEW_TEST_OFFSCREEN=1 REXWEBVIEW_TEST_URL_GUI=1 go test -count=1 ./...` | 通过，38 项检查 |
+| `go vet ./...` 和 `CGO_ENABLED=0 go vet ./...` | 均通过 |
+| `git diff --check` | 通过 |
+
+新增回归覆盖顶部／底部横排标签、两种密度、隐藏工具栏和左右侧栏；检查平铺与浮窗的正文尺寸和下沿。紧凑分屏使用 34 点标题栏、1 点分隔条。浮窗遮挡测试覆盖比例相交但屏幕上不遮挡、比例贴边但屏幕上已遮挡、最小化以及上层范围未知。浮层移动和缩放不重新隐藏，层内叶节点的布局改变仍等待动画。
+
+焦点回归模拟恢复请求之前已经开始的布局查询，确认旧查询不能授权恢复；新查询成功后只恢复一次。焦点移到其他窗格、切换会话、查询失败时不抢焦点，动画期间延迟到显示后恢复。两种原生实现都在 Rex 激活或面板关闭后发起新查询，并检查普通和浮动层级的 Rex 窗口；外部点击的保护按请求时间计算，避免查询慢时忘记点击。
+
+隐藏窗口测试实际验证了 WebKit 渲染、自定义关闭和窗格消失退出；URL 示例测试访问临时本地 HTTP 服务后正常关闭。隐藏窗口不安装原生覆盖层，因此这一轮初始验证尚未在真实 Rex 桌面交互中确认浮窗拖动、面板遮挡和焦点恢复。初始实现依赖 Rex 发布布局，鼠标拖动预览的后续验证如下；浮层边缘缩放仍由 Rex 管理。
+
+### 后续：迁移 Leaf 的标题栏鼠标跟随
+
+cgo 和 purego 都增加了左键拖动及松手的全局监听，共用 `float_drag.go` 的状态与坐标计算。鼠标事件直接平移 AppKit 窗口，拖动期间跳过旧布局定位及定时窗口查询；松手先显示最终位置，再安排一次后台刷新，等待落点确认或最多 500 毫秒后恢复普通跟随。缩放边缘、没有标题栏的窗格、切换会话、隐藏或取消拖动分别处理。
+
+- `REXWEBVIEW_TEST_OFFSCREEN=1 REXWEBVIEW_TEST_URL_GUI=1 go test -race -count=1 ./...`：提交前复核，56 项检查通过。
+- `CGO_ENABLED=0 REXWEBVIEW_TEST_OFFSCREEN=1 REXWEBVIEW_TEST_URL_GUI=1 go test -count=1 ./...`：提交前复核，56 项检查通过。
+- 两种构建的 `go vet ./...` 及 `git diff --check` 通过。
+- 拖动回归覆盖标题栏与缩放边缘的命中、负屏幕坐标和位移取整、松手位置与最后一次拖动不同、旧布局等待、确认后的恢复、500 毫秒超时，以及取消后忽略鼠标事件。
+- `go test -count=1 -run '^TestFloatDrag' -bench '^BenchmarkFloatDragMove$' -benchmem .`：初次迁移时在 Apple M4 Pro 上约 7.412 ns/op，0 B/op、0 allocs/op。这个结果只覆盖 Go 的状态锁和位移计算，不包含鼠标事件分发、AppKit 移窗或屏幕绘制，不能作为实际画面延迟。
+
+提交前复核补充了三项回归：前一次拖动的查询不能结束新拖动的预览；拖动中的中间位置不能结束松手后的等待；快捷键保护期不能消耗尚未执行的焦点恢复请求。这三项在隔离副本恢复旧逻辑后均失败，修正后通过。原生层还在鼠标按下时检查实际命中的最上层普通／浮动窗口，只有目标 Rex 窗口才开始预览；长按期间保持拖动状态，避免尚未移动时被焦点恢复打断。窗口命中检查只在按下时进行。
+
+已在 Rex 的“WebView 对比 · 修改前 / 修改后”tab 中运行 `HEAD bdea118` 的修改前版本和当前新版，并将两边放为浮窗供直接拖动比较。新版进程和 WebKit 页面标题“修改后 · 鼠标直接跟随”均已确认；本轮没有测量端到端拖动延迟。
+
 ## 结论
 
 - 两种构建都能跟随 Rex 窗格，单元测试和 WebKit 隐藏窗口测试都通过。

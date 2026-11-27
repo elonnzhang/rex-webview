@@ -30,8 +30,8 @@ func nativePref(name string) (string, bool) {
 }
 
 //export rexwvTick
-func rexwvTick(found C.int, x, y, w, h C.double, hostActive, selfActive C.int, out *C.RexWVTick) {
-	t := paneTick(tickIn{HostFound: found != 0, Host: rect{float64(x), float64(y), float64(w), float64(h)}, HostActive: hostActive != 0, SelfActive: selfActive != 0})
+func rexwvTick(found C.int, x, y, w, h C.double, hostActive, selfActive, reclaimBlocked C.int, out *C.RexWVTick) {
+	t := paneTick(tickIn{HostFound: found != 0, Host: rect{float64(x), float64(y), float64(w), float64(h)}, HostActive: hostActive != 0, SelfActive: selfActive != 0, ReclaimBlocked: reclaimBlocked != 0})
 	if t.Visible {
 		out.visible = 1
 	}
@@ -54,3 +54,32 @@ func rexwvKey(chord *C.char) C.int {
 
 //export rexwvHostActivated
 func rexwvHostActivated() { paneHostActivated() }
+
+//export rexwvBeginFloatDrag
+func rexwvBeginFloatDrag(x, y, fx, fy, w, h C.double) C.int {
+	if paneBeginFloatDrag(float64(x), float64(y), rect{float64(fx), float64(fy), float64(w), float64(h)}) {
+		return 1
+	}
+	return 0
+}
+
+//export rexwvMoveFloatDrag
+func rexwvMoveFloatDrag(x, y C.double, released C.int, fx, fy *C.double) C.int {
+	frame, ok := paneMoveFloatDrag(float64(x), float64(y), released != 0)
+	if !ok {
+		return 0
+	}
+	*fx, *fy = C.double(frame.X), C.double(frame.Y)
+	return 1
+}
+
+//export rexwvHoldFloatDrag
+func rexwvHoldFloatDrag() C.int {
+	if paneHoldFloatDrag() {
+		return 1
+	}
+	return 0
+}
+
+//export rexwvCancelFloatDrag
+func rexwvCancelFloatDrag() { paneCancelFloatDrag() }

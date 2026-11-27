@@ -188,6 +188,27 @@ func paneKey(chord string) bool {
 
 func paneHostActivated() {
 	if f := paneFollower; f != nil {
-		f.refreshSoon()
+		f.requestFocusAfterRefresh()
+	}
+}
+
+func paneBeginFloatDrag(x, y float64, frame rect) bool {
+	return paneFollower != nil && paneFollower.beginFloatDrag(x, y, frame)
+}
+
+func paneMoveFloatDrag(x, y float64, released bool) (rect, bool) {
+	if f := paneFollower; f != nil {
+		return f.moveFloatDrag(x, y, released)
+	}
+	return rect{}, false
+}
+
+func paneHoldFloatDrag() bool {
+	return paneFollower != nil && paneFollower.holdFloatDrag()
+}
+
+func paneCancelFloatDrag() {
+	if f := paneFollower; f != nil {
+		f.cancelFloatDrag()
 	}
 }

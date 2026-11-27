@@ -29,8 +29,10 @@ static RexWVPane *pane;
     NSRect _lastFrame;
     CGRect _pane;         // 整个窗格连同标题栏，原点在主屏幕左上角
     id _clickMonitor;     // 全局鼠标监听
+    id _dragMonitor;      // 左键拖动和松手；直接平移网页窗口
     CGPoint _click;       // 最近一次点在别的应用里的位置，原点在主屏幕左上角
     NSDate *_clickAt;
+    NSDate *_reclaimAt;   // 恢复请求的时间；布局查询慢时也不能把这次外部点击忘掉
     NSDate *_forwardedAt; // 上一次把键转给 Rex 的时候
 }
 
@@ -89,10 +91,12 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
         // 列表是从前到后的：到了 Rex 的窗口，后面的就压不着它了
         if (number == _host) return NO;
         CGRect bounds;
-        if (rexwv_int(item, kCGWindowOwnerPID) != _hostPid || rexwv_int(item, kCGWindowLayer) != 0 || !rexwv_bounds(item, &bounds))
+        int level = rexwv_int(item, kCGWindowLayer);
+        if (rexwv_int(item, kCGWindowOwnerPID) != _hostPid ||
+            (level != NSNormalWindowLevel && level != NSFloatingWindowLevel) || !rexwv_bounds(item, &bounds))
             continue;
         // Rex 的主窗口有时是叠在一起、一样大的两层。前面那层不算压着，改成跟着它
-        if (CGRectEqualToRect(bounds, hostBounds)) {
+        if (level == NSNormalWindowLevel && CGRectEqualToRect(bounds, hostBounds)) {
             _host = number;
             return NO;
         }
@@ -120,9 +124,22 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
     return _hasHost && NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == _hostPid;
 }
 
+// 前台应用不一定是鼠标事件的接收方（例如 Command 拖动后台窗口）。
+// 只在按下时检查命中的最上层普通／浮动窗口，避免拖动时重复做命中检查。
+- (BOOL)hostOwnsPoint:(CGPoint)point {
+    for (NSDictionary *item in rexwv_windows()) {
+        int level = rexwv_int(item, kCGWindowLayer);
+        CGRect bounds;
+        if ((level != NSNormalWindowLevel && level != NSFloatingWindowLevel) || !rexwv_bounds(item, &bounds)) continue;
+        if (CGRectContainsPoint(bounds, point)) return (CGWindowID)rexwv_int(item, kCGWindowNumber) == _host;
+    }
+    return NO;
+}
+
 // ---- 跟着窗格 ----
 
 - (void)hide {
+    rexwvCancelFloatDrag();
     if (!_shown) return;
     [self.window orderOut:nil];
     _shown = NO;
@@ -145,6 +162,8 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
 }
 
 - (void)follow {
+    // 鼠标事件已经移动了窗口；布局旧坐标不能把它拉回去，也无需查询 WindowServer。
+    if (rexwvHoldFloatDrag()) return;
     _ticks++;
     BOOL selfActive = NSApp.isActive, hostActive = [self hostIsActive];
     // Rex 的窗口只在 Rex（或者网页窗口）在前面时才会动，别的时候一秒看几次就够了
@@ -158,7 +177,8 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
         hostActive = [self hostIsActive];
     }
     RexWVTick t = {0};
-    rexwvTick(found, host.origin.x, host.origin.y, host.size.width, host.size.height, hostActive, selfActive, &t);
+    BOOL reclaimBlocked = _forwardedAt != nil && -_forwardedAt.timeIntervalSinceNow < 1;
+    rexwvTick(found, host.origin.x, host.origin.y, host.size.width, host.size.height, hostActive, selfActive, reclaimBlocked, &t);
     _focused = t.focused != 0;
     _pane = CGRectMake(t.px, t.py, t.pw, t.ph);
     if (!_focused || !hostActive) _focusWhenShown = NO;
@@ -173,10 +193,14 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
         return;
     }
     CGRect body = CGRectMake(t.x, t.y, t.w, t.h);
-    if (!watching || _ticks % 3 == 0) {
+    if (!_shown || !watching || _ticks % 3 == 0) {
         BOOL covered = [self coveredByHost:body hostBounds:host];
         // 命令面板关掉了，焦点还在这个窗格上：把键盘接回来
-        if (!covered && _covered && _focused && hostActive) _focusWhenShown = YES;
+        if (!covered && _covered && hostActive) {
+            _focusWhenShown = NO;
+            _reclaimAt = [NSDate date];
+            rexwvHostActivated();
+        }
         _covered = covered;
     }
     if (_covered) {
@@ -207,6 +231,9 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
     if (_focusWhenShown) {
         _focusWhenShown = NO;
         if (_focused && [self hostIsActive]) [self takeFocus];
+    } else if (t.focus == 3 && _focused && [self hostIsActive] && ![self clickedOutside] &&
+               (_forwardedAt == nil || -_forwardedAt.timeIntervalSinceNow >= 1)) {
+        [self takeFocus];
     }
 }
 
@@ -234,16 +261,40 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
 // 最近 0.75 秒里点过鼠标、点在这个窗格外面：用户是点了 Rex 的侧栏、别的窗格才回到 Rex 的。
 // 点击由全局鼠标监听记下来，它和激活通知谁先到不一定，所以等激活 0.25 秒后再问。
 - (BOOL)clickedOutside {
-    if (_clickAt == nil || -_clickAt.timeIntervalSinceNow > 0.75) return NO;
+    if (_clickAt == nil || _reclaimAt == nil || [_reclaimAt timeIntervalSinceDate:_clickAt] > 0.75) return NO;
     return !CGRectContainsPoint(_pane, _click);
 }
 
-- (void)recordClick {
+- (void)recordClick:(NSEvent *)event {
+    rexwvCancelFloatDrag();
     NSScreen *primary = NSScreen.screens.firstObject;
     if (primary == nil) return;
     NSPoint m = NSEvent.mouseLocation; // 原点在主屏幕左下角
     _click = CGPointMake(m.x, primary.frame.size.height - m.y);
     _clickAt = [NSDate date];
+    if (event.type == NSEventTypeLeftMouseDown && _shown && [self hostOwnsPoint:_click]) {
+        rexwvBeginFloatDrag(_click.x, _click.y, _lastFrame.origin.x,
+                           primary.frame.size.height - NSMaxY(_lastFrame), _lastFrame.size.width, _lastFrame.size.height);
+    }
+}
+
+- (void)moveFloatDrag:(NSEvent *)event {
+    NSScreen *primary = NSScreen.screens.firstObject;
+    if (primary == nil || !_shown || ![self hostIsActive]) {
+        rexwvCancelFloatDrag();
+        return;
+    }
+    NSPoint mouse = NSEvent.mouseLocation;
+    double x, y;
+    if (!rexwvMoveFloatDrag(mouse.x, primary.frame.size.height - mouse.y,
+                           event.type == NSEventTypeLeftMouseUp, &x, &y)) return;
+    NSPoint origin = NSMakePoint(x, primary.frame.size.height - y - _lastFrame.size.height);
+    if (!NSEqualPoints(origin, _lastFrame.origin)) {
+        [self.window setFrameOrigin:origin];
+        _lastFrame.origin = origin;
+    }
+    if (!_raised && _hasHost && ![self directlyAboveHost])
+        [self.window orderWindow:NSWindowAbove relativeTo:_host];
 }
 
 - (void)appActivated:(NSNotification *)note {
@@ -258,15 +309,14 @@ static int rexwv_int(NSDictionary *item, CFStringRef key) {
     if (!_hasHost) return;
     // Rex 把它的窗口提到了网页窗口上面，马上回到上面去
     if (_shown) [self.window orderWindow:NSWindowAbove relativeTo:_host];
-    rexwvHostActivated();
+    _focusWhenShown = NO;
     // 回到 Rex 时焦点还在这个窗格上，键盘就该回到网页窗口手里。等一小会儿再看：
     // 也可能是点了 Rex 里别的窗格才到前面来的，那样焦点马上就不在这里了
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!self->_shown || self->_covered || !self->_focused || ![self hostIsActive]) return;
-        // 点了 Rex 里别处（比如侧栏里的 tab）：键盘留给 Rex。抢回来的话，这一下点击白点，tab 切不过去
-        if ([self clickedOutside]) return;
-        if (self->_forwardedAt != nil && -self->_forwardedAt.timeIntervalSinceNow < 1) return;
-        [self takeFocus];
+        if (pane != self || ![self hostIsActive]) return;
+        // 鼠标按下和 Rex 焦点更新可能比激活通知晚到；先查新布局，再由 follow 接回键盘。
+        self->_reclaimAt = [NSDate date];
+        rexwvHostActivated();
     });
 }
 
@@ -323,15 +373,25 @@ static NSString *rexwv_chord(NSEvent *event) {
                                 NSWindowCollectionBehaviorIgnoresCycle;
     window.contentView.wantsLayer = YES;
     window.contentView.layer.masksToBounds = YES;
-    _keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
+    _keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskLeftMouseDown |
+                                                              NSEventMaskRightMouseDown | NSEventMaskOtherMouseDown
+                                                      handler:^NSEvent *(NSEvent *event) {
+        if (event.type != NSEventTypeKeyDown) {
+            rexwvCancelFloatDrag();
+            return event;
+        }
         return [self handleKey:event] ? nil : event;
     }];
     // 点在别的应用里的鼠标。全局监听鼠标事件不需要辅助功能权限
     _clickMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown |
                                                                    NSEventMaskOtherMouseDown
                                                            handler:^(NSEvent *event) {
-                                                               [self recordClick];
+                                                               [self recordClick:event];
                                                            }];
+    _dragMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp
+                                                        handler:^(NSEvent *event) {
+                                                            [self moveFloatDrag:event];
+                                                        }];
     [self pickHost];
     [NSWorkspace.sharedWorkspace.notificationCenter addObserver:self
                                                       selector:@selector(appActivated:)
@@ -342,6 +402,7 @@ static NSString *rexwv_chord(NSEvent *event) {
 }
 
 - (void)detach {
+    rexwvCancelFloatDrag();
     _shown = NO;
     [_timer invalidate];
     _timer = nil;
@@ -349,6 +410,8 @@ static NSString *rexwv_chord(NSEvent *event) {
     _keyMonitor = nil;
     if (_clickMonitor != nil) [NSEvent removeMonitor:_clickMonitor];
     _clickMonitor = nil;
+    if (_dragMonitor != nil) [NSEvent removeMonitor:_dragMonitor];
+    _dragMonitor = nil;
     [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self];
     self.window = nil;
 }

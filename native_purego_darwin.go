@@ -40,6 +40,7 @@ const (
 	nsEventMaskKeyDown = 1 << 10
 	// 左、右、其他鼠标键按下
 	nsEventMaskMouseDown = 1<<1 | 1<<3 | 1<<25
+	nsEventMaskLeftDrag  = 1<<6 | 1<<2 // 左键拖动和松手
 	nsUTF8Encoding       = 4
 
 	nsCollectionTransient           = 1 << 3
@@ -59,6 +60,7 @@ var (
 	msgSetFloat func(obj id, sel objc.SEL, v float64)
 	msgRect     func(obj id, sel objc.SEL) cgRect
 	msgSetFrame func(obj id, sel objc.SEL, r cgRect, display bool)
+	msgSetPoint func(obj id, sel objc.SEL, p cgPoint)
 	msgTimer    func(cls id, sel objc.SEL, interval float64, repeats bool, block objc.Block) id
 
 	cgWindowListCopyWindowInfo func(option, relativeTo uint32) uintptr
@@ -115,6 +117,7 @@ var loadNative = sync.OnceFunc(func() {
 	purego.RegisterFunc(&msgSetFloat, msgSendFn)
 	purego.RegisterFunc(&msgRect, stret)
 	purego.RegisterFunc(&msgSetFrame, msgSendFn)
+	purego.RegisterFunc(&msgSetPoint, msgSendFn)
 	purego.RegisterFunc(&msgTimer, msgSendFn)
 
 	purego.RegisterLibFunc(&cgWindowListCopyWindowInfo, libCG, "CGWindowListCopyWindowInfo")
@@ -279,8 +282,10 @@ type purePane struct {
 	lastFrame      cgRect
 	pane           rect      // 整个窗格连同标题栏，原点在主屏幕左上角
 	clicks         id        // 全局鼠标监听
+	drags          id        // 左键拖动和松手；直接平移网页窗口
 	click          cgPoint   // 最近一次点在别的应用里的位置，原点在主屏幕左上角
 	clickAt        time.Time // 那次点击的时间
+	reclaimAt      time.Time // 恢复请求的时间；布局查询慢时也不能把这次外部点击忘掉
 	forwardedAt    time.Time // 上一次把键转给 Rex 的时候
 }
 
@@ -335,11 +340,12 @@ func (p *purePane) coveredByHost(body, hostBounds cgRect) bool {
 			return false
 		}
 		var b cgRect
-		if int32(windowInt(item, kWindowOwnerPID)) != p.hostPid || windowInt(item, kWindowLayer) != 0 || !windowBounds(item, &b) {
+		level := windowInt(item, kWindowLayer)
+		if int32(windowInt(item, kWindowOwnerPID)) != p.hostPid || (level != nsNormalLevel && level != nsFloatingLevel) || !windowBounds(item, &b) {
 			return true
 		}
 		// Rex 的主窗口有时是叠在一起、一样大的两层。前面那层不算压着，改成跟着它
-		if b == hostBounds {
+		if level == nsNormalLevel && b == hostBounds {
 			p.host = number
 			return false
 		}
@@ -385,7 +391,28 @@ func (p *purePane) hostIsActive() bool {
 	return front != 0 && int32(msg(front, "processIdentifier")) == p.hostPid
 }
 
+// 前台应用不一定是鼠标事件的接收方（例如 Command 拖动后台窗口）。
+// 只在按下时检查命中的最上层普通／浮动窗口，避免拖动时重复做命中检查。
+func (p *purePane) hostOwnsPoint(point cgPoint) bool {
+	owned := false
+	eachWindow(cgListOnScreenOnly|cgListExcludeDesktopElement, 0, false, func(item id) bool {
+		level := windowInt(item, kWindowLayer)
+		var bounds cgRect
+		if (level != nsNormalLevel && level != nsFloatingLevel) || !windowBounds(item, &bounds) {
+			return true
+		}
+		if point.X >= bounds.Origin.X && point.X < bounds.Origin.X+bounds.Size.W &&
+			point.Y >= bounds.Origin.Y && point.Y < bounds.Origin.Y+bounds.Size.H {
+			owned = uint32(windowInt(item, kWindowNumber)) == p.host
+			return false
+		}
+		return true
+	})
+	return owned
+}
+
 func (p *purePane) hide() {
+	paneCancelFloatDrag()
 	if !p.shown {
 		return
 	}
@@ -420,6 +447,10 @@ func (p *purePane) lower() {
 }
 
 func (p *purePane) follow() {
+	// 鼠标事件已经移动了窗口；布局旧坐标不能把它拉回去，也无需查询 WindowServer。
+	if paneHoldFloatDrag() {
+		return
+	}
 	p.ticks++
 	selfActive, hostActive := msgBool(nsApp(), "isActive"), p.hostIsActive()
 	// Rex 的窗口只在 Rex（或者网页窗口）在前面时才会动，别的时候一秒看几次就够了
@@ -436,6 +467,7 @@ func (p *purePane) follow() {
 	t := paneTick(tickIn{
 		HostFound: found, Host: rect{host.Origin.X, host.Origin.Y, host.Size.W, host.Size.H},
 		HostActive: hostActive, SelfActive: selfActive,
+		ReclaimBlocked: !p.forwardedAt.IsZero() && time.Since(p.forwardedAt) < time.Second,
 	})
 	p.focused = t.Focused
 	p.pane = t.Pane
@@ -455,11 +487,13 @@ func (p *purePane) follow() {
 	}
 	primary := msgRect(msgID(screens, "objectAtIndex:", 0), sel("frame"))
 	body := cgRect{cgPoint{t.Frame.X, t.Frame.Y}, cgSize{t.Frame.W, t.Frame.H}}
-	if !watching || p.ticks%3 == 0 {
+	if !p.shown || !watching || p.ticks%3 == 0 {
 		covered := p.coveredByHost(body, host)
 		// 命令面板关掉了，焦点还在这个窗格上：把键盘接回来
-		if !covered && p.covered && p.focused && hostActive {
-			p.focusWhenShown = true
+		if !covered && p.covered && hostActive {
+			p.focusWhenShown = false
+			p.reclaimAt = time.Now()
+			paneHostActivated()
 		}
 		p.covered = covered
 	}
@@ -502,6 +536,9 @@ func (p *purePane) follow() {
 		if p.focused && p.hostIsActive() {
 			p.takeFocus()
 		}
+	} else if t.Focus == focusReclaim && p.focused && p.hostIsActive() && !p.clickedOutside() &&
+		(p.forwardedAt.IsZero() || time.Since(p.forwardedAt) >= time.Second) {
+		p.takeFocus()
 	}
 }
 
@@ -545,7 +582,7 @@ func (p *purePane) activateHost() {
 // clickedOutside 看最近 0.75 秒里有没有点过鼠标、点在这个窗格外面：用户是点了 Rex 的侧栏、别的窗格才回到 Rex 的。
 // 点击由全局鼠标监听记下来，它和激活通知谁先到不一定，所以等激活 0.25 秒后再问。
 func (p *purePane) clickedOutside() bool {
-	if p.clickAt.IsZero() || time.Since(p.clickAt) > 750*time.Millisecond {
+	if p.clickAt.IsZero() || p.reclaimAt.IsZero() || p.reclaimAt.Sub(p.clickAt) > 750*time.Millisecond {
 		return false
 	}
 	x, y := p.click.X, p.click.Y
@@ -554,7 +591,8 @@ func (p *purePane) clickedOutside() bool {
 }
 
 // recordClick 记下一次点在别的应用里的鼠标，坐标换成原点在主屏幕左上角。
-func (p *purePane) recordClick() {
+func (p *purePane) recordClick(event id) {
+	paneCancelFloatDrag()
 	screens := msgID(class("NSScreen"), "screens")
 	if screens == 0 || msg(screens, "count") == 0 {
 		return
@@ -562,6 +600,35 @@ func (p *purePane) recordClick() {
 	primary := msgRect(msgID(screens, "objectAtIndex:", 0), sel("frame"))
 	m := msgPoint(class("NSEvent"), sel("mouseLocation")) // 原点在主屏幕左下角
 	p.click, p.clickAt = cgPoint{m.X, primary.Size.H - m.Y}, time.Now()
+	if msg(event, "type") == 1 && p.shown && p.hostOwnsPoint(p.click) { // NSEventTypeLeftMouseDown
+		paneBeginFloatDrag(p.click.X, p.click.Y, rect{p.lastFrame.Origin.X, primary.Size.H - p.lastFrame.Origin.Y - p.lastFrame.Size.H,
+			p.lastFrame.Size.W, p.lastFrame.Size.H})
+	}
+}
+
+func (p *purePane) moveFloatDrag(event id) {
+	if !p.shown || !p.hostIsActive() {
+		paneCancelFloatDrag()
+		return
+	}
+	screens := msgID(class("NSScreen"), "screens")
+	if screens == 0 || msg(screens, "count") == 0 {
+		return
+	}
+	primary := msgRect(msgID(screens, "objectAtIndex:", 0), sel("frame"))
+	mouse := msgPoint(class("NSEvent"), sel("mouseLocation"))
+	frame, ok := paneMoveFloatDrag(mouse.X, primary.Size.H-mouse.Y, msg(event, "type") == 2)
+	if !ok {
+		return
+	}
+	origin := cgPoint{frame.X, primary.Size.H - frame.maxY()}
+	if origin != p.lastFrame.Origin {
+		msgSetPoint(p.window, sel("setFrameOrigin:"), origin)
+		p.lastFrame.Origin = origin
+	}
+	if !p.raised && p.hasHost && !p.directlyAboveHost() {
+		p.orderAboveHost()
+	}
 }
 
 func (p *purePane) appActivated(note id) {
@@ -585,21 +652,16 @@ func (p *purePane) appActivated(note id) {
 	if p.shown {
 		p.orderAboveHost()
 	}
-	paneHostActivated()
+	p.focusWhenShown = false
 	// 回到 Rex 时焦点还在这个窗格上，键盘就该回到网页窗口手里。等一小会儿再看：
 	// 也可能是点了 Rex 里别的窗格才到前面来的，那样焦点马上就不在这里了
 	afterOnMain(0.25, func() {
-		if nativePane != p || !p.shown || p.covered || !p.focused || !p.hostIsActive() {
+		if nativePane != p || !p.hostIsActive() {
 			return
 		}
-		// 点了 Rex 里别处（比如侧栏里的 tab）：键盘留给 Rex。抢回来的话，这一下点击白点，tab 切不过去
-		if p.clickedOutside() {
-			return
-		}
-		if !p.forwardedAt.IsZero() && time.Since(p.forwardedAt) < time.Second {
-			return
-		}
-		p.takeFocus()
+		// 鼠标按下和 Rex 焦点更新可能比激活通知晚到；先查新布局，再由 follow 接回键盘。
+		p.reclaimAt = time.Now()
+		paneHostActivated()
 	})
 }
 
@@ -666,22 +728,33 @@ func (p *purePane) attach(window id) {
 
 	// 这些 block 都由 AppKit 拷走保存，这边的引用马上放掉
 	keys := objc.NewBlock(func(_ objc.Block, event id) id {
-		if nativePane == p && p.handleKey(event) {
-			return 0
+		if nativePane == p {
+			if msg(event, "type") != 10 { // NSEventTypeKeyDown
+				paneCancelFloatDrag()
+			} else if p.handleKey(event) {
+				return 0
+			}
 		}
 		return event
 	})
-	p.monitor = msgID(msgID(class("NSEvent"), "addLocalMonitorForEventsMatchingMask:handler:", nsEventMaskKeyDown, uintptr(keys)), "retain")
+	p.monitor = msgID(msgID(class("NSEvent"), "addLocalMonitorForEventsMatchingMask:handler:", nsEventMaskKeyDown|nsEventMaskMouseDown, uintptr(keys)), "retain")
 	keys.Release()
 
 	// 点在别的应用里的鼠标。全局监听鼠标事件不需要辅助功能权限
-	clicked := objc.NewBlock(func(_ objc.Block, _ id) {
+	clicked := objc.NewBlock(func(_ objc.Block, event id) {
 		if nativePane == p {
-			p.recordClick()
+			p.recordClick(event)
 		}
 	})
 	p.clicks = msgID(msgID(class("NSEvent"), "addGlobalMonitorForEventsMatchingMask:handler:", nsEventMaskMouseDown, uintptr(clicked)), "retain")
 	clicked.Release()
+	dragged := objc.NewBlock(func(_ objc.Block, event id) {
+		if nativePane == p {
+			p.moveFloatDrag(event)
+		}
+	})
+	p.drags = msgID(msgID(class("NSEvent"), "addGlobalMonitorForEventsMatchingMask:handler:", nsEventMaskLeftDrag, uintptr(dragged)), "retain")
+	dragged.Release()
 
 	p.pickHost()
 
@@ -706,13 +779,14 @@ func (p *purePane) attach(window id) {
 }
 
 func (p *purePane) detach() {
+	paneCancelFloatDrag()
 	p.shown = false
 	if p.timer != 0 {
 		msg(p.timer, "invalidate")
 		msg(p.timer, "release")
 		p.timer = 0
 	}
-	for _, m := range []*id{&p.monitor, &p.clicks} {
+	for _, m := range []*id{&p.monitor, &p.clicks, &p.drags} {
 		if *m != 0 {
 			msg(class("NSEvent"), "removeMonitor:", uintptr(*m))
 			msg(*m, "release")

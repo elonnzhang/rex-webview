@@ -67,9 +67,9 @@ err := rexwebview.Run(ctx, rexwebview.Options{
 
 ## Floating panes and display limits
 
-In Rex preview.21 (API 18), `session.view` lists layers from back to front. Each leaf `rect` in a split floating layer is already in window-layout coordinates. Even a partial overlap from a higher floating pane hides the entire WebView so Rex's controls remain clickable.
+In Rex preview.21 (API 18), `session.view` lists layers from back to front. Each leaf `rect` in a split floating layer is already in window-layout coordinates. The host converts higher floating layers and the page body to screen coordinates before checking overlap. Even a partial overlap with the body hides the entire WebView so Rex's controls remain clickable. Moving or resizing the same floating layer keeps the page visible when its internal layout stays the same; split changes still wait for the layout animation.
 
-The SDK estimates headers, sidebar width and gaps from local Rex preferences. Floating-layer insets and frame-by-frame alignment during a drag still need desktop verification. With multiple Rex desktop windows, placement depends on the front Rex window. The overlay and Rex must run on the same Mac. See the [technical notes (Chinese)](docs/technical-principles.md) for the coordinate conversion and focus handling.
+The SDK estimates headers, sidebar width and gaps from local Rex preferences, including top or bottom horizontal tabs. Compact mode uses preview.23's 34-point header and 1-point divider. Bottom tabs follow [Leaf PR #87](https://github.com/DeepanshuMishraa/leaf/pull/87). Dragging a floating pane's header moves the page directly with the pointer, without waiting for Rex layout responses or redrawing the page. On release, the host holds the preview until the layout confirms the position, for up to 500 milliseconds. The outer header edges remain available for Rex resizing. Floating-layer insets and actual drag latency still need desktop verification. With multiple Rex desktop windows, placement depends on the front Rex window. The overlay and Rex must run on the same Mac. See the [technical notes (Chinese)](docs/technical-principles.md) for the coordinate conversion and focus handling.
 
 ## Verification
 

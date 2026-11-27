@@ -23,7 +23,8 @@ func (r rect) maxX() float64 { return r.X + r.W }
 func (r rect) maxY() float64 { return r.Y + r.H }
 
 func (r rect) intersects(o rect) bool {
-	return r.X < o.maxX() && o.X < r.maxX() && r.Y < o.maxY() && o.Y < r.maxY()
+	return r.W > 0 && r.H > 0 && o.W > 0 && o.H > 0 &&
+		r.X < o.maxX() && o.X < r.maxX() && r.Y < o.maxY() && o.Y < r.maxY()
 }
 
 // placement 是窗格在当前 tab 里的位置（比例）和它是不是 Rex 里有焦点的那个。
@@ -32,7 +33,27 @@ type placement struct {
 	Focused  bool
 	floating bool
 	// gapOffset 是逐级分屏时分给当前叶节点的接缝修正，以一个完整 gap 为单位。
-	gapOffset rect
+	gapOffset   rect
+	layerBounds *rect
+	layerID     string
+	upperLayers []rect // 上层浮窗的比例；遮挡须在屏幕坐标里判断
+}
+
+// followsLayer 判断同一浮层是否只是移动或缩放，叶节点在层内的位置和接缝保持不变。
+func (p *placement) followsLayer(old *placement) bool {
+	if p == nil || old == nil || !p.floating || !old.floating || p.layerID == "" || p.layerID != old.layerID || p.layerBounds == nil || old.layerBounds == nil {
+		return false
+	}
+	a, b := *old.layerBounds, *p.layerBounds
+	if a.W <= 0 || a.H <= 0 || b.W <= 0 || b.H <= 0 {
+		return false
+	}
+	same := func(x, y float64) bool { return math.Abs(x-y) < 1e-6 }
+	return same((old.Rect.X-a.X)/a.W, (p.Rect.X-b.X)/b.W) &&
+		same((old.Rect.Y-a.Y)/a.H, (p.Rect.Y-b.Y)/b.H) &&
+		same(old.Rect.W/a.W, p.Rect.W/b.W) && same(old.Rect.H/a.H, p.Rect.H/b.H) &&
+		same(old.gapOffset.X, p.gapOffset.X) && same(old.gapOffset.Y, p.gapOffset.Y) &&
+		same(old.gapOffset.W, p.gapOffset.W) && same(old.gapOffset.H, p.gapOffset.H)
 }
 
 func parseRect(v any) (rect, bool) {
@@ -43,7 +64,7 @@ func parseRect(v any) (rect, bool) {
 	var n [4]float64
 	for i, x := range a {
 		f, ok := x.(float64)
-		if !ok {
+		if !ok || math.IsNaN(f) || math.IsInf(f, 0) {
 			return rect{}, false
 		}
 		n[i] = f
@@ -54,6 +75,14 @@ func parseRect(v any) (rect, bool) {
 // 沿 session.view 的 split.before / split.after 找叶节点。服务端的 rect 没扣分隔条；
 // Rex 将每一级父窗格先减一个 gap，再把余下宽度或高度按 ratio 分给两个孩子。
 func findBlock(block string, node any) (rect, rect, bool) {
+	if nodes, ok := node.([]any); ok {
+		for _, child := range nodes {
+			if r, offset, found := findBlock(block, child); found {
+				return r, offset, true
+			}
+		}
+		return rect{}, rect{}, false
+	}
 	n, _ := node.(map[string]any)
 	if n["block_id"] == block {
 		r, ok := parseRect(n["rect"])
@@ -140,23 +169,31 @@ func place(view map[string]any, block string, floatingPanes bool) *placement {
 	// layers 从后往前排。只有目标层后面的条目有可能挡着它，和谁拿着键盘焦点无关。
 	layers := objects(win["layers"])
 	for i, layer := range layers {
-		if layer["state"] == "minimized" || (layer["kind"] != "tiled" && !floatingPanes) {
+		kind, _ := layer["kind"].(string)
+		if layer["state"] == "minimized" || (kind != "tiled" && (kind != "floating" || !floatingPanes)) {
 			continue
 		}
 		at, offset, found := findBlock(block, layer["layout"])
 		if !found {
 			continue
 		}
+		var upperLayers []rect
 		for _, upper := range layers[i+1:] {
 			if upper["state"] == "minimized" || upper["layout"] == nil {
 				continue
 			}
 			bounds, ok := parseRect(upper["bounds"])
-			if !ok || bounds.intersects(at) {
+			if !ok {
 				return nil
 			}
+			upperLayers = append(upperLayers, bounds)
 		}
-		return &placement{Rect: at, Focused: focused, gapOffset: offset, floating: layer["kind"] == "floating"}
+		p := &placement{Rect: at, Focused: focused, gapOffset: offset, floating: kind == "floating", upperLayers: upperLayers}
+		p.layerID, _ = layer["layer_id"].(string)
+		if bounds, ok := parseRect(layer["bounds"]); ok {
+			p.layerBounds = new(bounds)
+		}
+		return p
 	}
 	return nil
 }
@@ -178,7 +215,7 @@ func chromeFrom(pref func(name string) (string, bool)) chrome {
 	edge := 8.0
 	if get("paneDensity") == "compact" {
 		edge = 0
-		c = chrome{Top: 41, Gap: 2, Header: 35}
+		c = chrome{Top: 41, Gap: 1, Header: 34}
 	}
 	headers, ok := pref("paneHeaderVisibility")
 	if !ok {
@@ -195,6 +232,10 @@ func chromeFrom(pref func(name string) (string, bool)) chrome {
 	toolbar, ok := pref("toolbarBehavior")
 	if vertical || (ok && toolbar != "alwaysShow") {
 		c.Top = edge
+	}
+	// Leaf PR #87：底部横排标签的工具栏占用下沿，两个画布的上沿恢复为普通边距。
+	if !vertical && (!ok || toolbar == "alwaysShow") && get("tabBarEdge") == "bottom" {
+		c.Bottom, c.Top = c.Top, edge
 	}
 	c.floatTop = c.Top
 	if vertical && (!ok || toolbar == "alwaysShow") {
@@ -236,6 +277,17 @@ func (c chrome) body(p placement, win rect) rect {
 	// 分别取整四条边，避免先舍入起点再舍入宽度导致右边越过原生描边。
 	x, y = math.Round(x)+border, math.Round(y)+max(c.Header, border)
 	return rect{x, y, math.Round(right) - border - x, math.Round(bottom) - border - y}
+}
+
+func (c chrome) floatingFrame(layer, win rect) rect {
+	w, h := win.W-c.Left-c.Right, win.H-c.floatTop-c.Bottom
+	return rect{win.X + c.Left + layer.X*w, win.Y + c.floatTop + layer.Y*h, layer.W * w, layer.H * h}
+}
+
+func (c chrome) covered(p placement, body, win rect) bool {
+	return slices.ContainsFunc(p.upperLayers, func(layer rect) bool {
+		return c.floatingFrame(layer, win).intersects(body)
+	})
 }
 
 // shownSession 是 Rex App 眼下显示的会话，从它的设置 Workspace.lastFocusedSession 里读，读不出来是空的。
@@ -360,6 +412,7 @@ func parseBindings(keymap []byte, reservedKeys []string) []binding {
 		Bindings []struct {
 			Keys   []string `json:"keys"`
 			Action string   `json:"action"`
+			Mode   string   `json:"mode"`
 			Args   any      `json:"args"`
 		} `json:"bindings"`
 	}
@@ -367,7 +420,7 @@ func parseBindings(keymap []byte, reservedKeys []string) []binding {
 	var out []binding
 	for _, b := range res.Bindings {
 		// pane.send_key 是把键打进终端里，对网页没有意义
-		if b.Action == "" || b.Action == "pane.send_key" {
+		if b.Action == "" || b.Action == "pane.send_key" || b.Mode != "" {
 			continue
 		}
 		keys := make([]string, 0, len(b.Keys))
